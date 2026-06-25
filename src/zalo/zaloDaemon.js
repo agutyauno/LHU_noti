@@ -1,0 +1,407 @@
+import { Zalo, LoginQRCallbackEventType } from "zca-js";
+import db from "../db/index.js";
+import { syncUserSchedule } from "../services/lhuService.js";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import sharp from "sharp";
+
+dotenv.config();
+
+let apiInstance = null;
+let isStartingQR = false;
+
+// Format helper for dates
+const formatLocalTime = (date) => {
+  const pad = (num) => String(num).padStart(2, '0');
+  const y = date.getFullYear();
+  const m = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const h = pad(date.getHours());
+  const min = pad(date.getMinutes());
+  const s = pad(date.getSeconds());
+  return `${y}-${m}-${d} ${h}:${min}:${s}`;
+};
+
+/**
+ * Periodically updates the bot heartbeat in SQLite so Next.js knows it is active.
+ */
+function runHeartbeat() {
+  setInterval(() => {
+    try {
+      db.prepare(`
+        UPDATE zalo_sessions
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE key = 'bot_session'
+      `).run();
+    } catch (err) {
+      console.error("[Daemon] Heartbeat update failed:", err.message);
+    }
+  }, 10000);
+}
+
+/**
+ * Starts the Zalo Bot Daemon
+ */
+async function startDaemon() {
+  console.log("[Daemon] Starting Zalo Bot background daemon...");
+  runHeartbeat();
+  
+  // Try to restore session from DB
+  const session = db.prepare("SELECT * FROM zalo_sessions WHERE key = 'bot_session'").get();
+  if (session && session.cookie && session.status === 'CONNECTED') {
+    console.log("[Daemon] Found existing Zalo session. Attempting cookie login...");
+    try {
+      const cookies = JSON.parse(session.cookie);
+      const imei = session.imei;
+      const userAgent = session.user_agent;
+      
+      const zalo = new Zalo({
+        selfListen: false,
+        imageMetadataGetter: async (filePath) => {
+          const data = await fs.promises.readFile(filePath);
+          const metadata = await sharp(data).metadata();
+          return {
+            height: metadata.height,
+            width: metadata.width,
+            size: metadata.size || data.length,
+          };
+        }
+      });
+      
+      apiInstance = await zalo.login({
+        cookie: cookies,
+        imei,
+        userAgent
+      });
+      
+      console.log(`[Daemon] Cookie login successful! Logged in as: ${apiInstance.getOwnId()}`);
+      db.prepare(`
+        UPDATE zalo_sessions
+        SET status = 'CONNECTED', error_message = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE key = 'bot_session'
+      `).run();
+      
+      setupListener(apiInstance);
+      startNotificationScheduler();
+    } catch (err) {
+      console.error("[Daemon] Cookie login failed:", err.message);
+      db.prepare(`
+        UPDATE zalo_sessions
+        SET status = 'DISCONNECTED', error_message = ?
+        WHERE key = 'bot_session'
+      `).run(err.message);
+      
+      await startQRLoginFlow();
+    }
+  } else {
+    console.log("[Daemon] No active session found. Spawning QR Login Flow...");
+    await startQRLoginFlow();
+  }
+}
+
+/**
+ * Initiates the QR Login Flow
+ */
+async function startQRLoginFlow() {
+  if (isStartingQR) return;
+  isStartingQR = true;
+  
+  db.prepare(`
+    INSERT OR REPLACE INTO zalo_sessions (key, status, qr_code_data, error_message)
+    VALUES ('bot_session', 'QR_GENERATING', NULL, NULL)
+  `).run();
+
+  const zalo = new Zalo({
+    selfListen: false,
+    imageMetadataGetter: async (filePath) => {
+      const data = await fs.promises.readFile(filePath);
+      const metadata = await sharp(data).metadata();
+      return {
+        height: metadata.height,
+        width: metadata.width,
+        size: metadata.size || data.length,
+      };
+    }
+  });
+
+  try {
+    const api = await zalo.loginQR({}, async (event) => {
+      switch (event.type) {
+        case LoginQRCallbackEventType.QRCodeGenerated: {
+          const qrBase64 = event.data.image.startsWith("data:") ? event.data.image : `data:image/png;base64,${event.data.image}`;
+          db.prepare(`
+            UPDATE zalo_sessions
+            SET status = 'QR_READY', qr_code_data = ?
+            WHERE key = 'bot_session'
+          `).run(qrBase64);
+          console.log("[Daemon] QR Code generated successfully. Please scan from Web Admin.");
+          break;
+        }
+        case LoginQRCallbackEventType.QRCodeScanned: {
+          db.prepare(`
+            UPDATE zalo_sessions
+            SET status = 'QR_SCANNED', error_message = ?
+            WHERE key = 'bot_session'
+          `).run(`Scanned by ${event.data.display_name}`);
+          console.log(`[Daemon] QR Code scanned by ${event.data.display_name}. Waiting for authorization...`);
+          break;
+        }
+        case LoginQRCallbackEventType.GotLoginInfo: {
+          const cookieStr = JSON.stringify(event.data.cookie);
+          db.prepare(`
+            UPDATE zalo_sessions
+            SET status = 'CONNECTED', cookie = ?, imei = ?, user_agent = ?, error_message = NULL
+            WHERE key = 'bot_session'
+          `).run(cookieStr, event.data.imei, event.data.userAgent);
+          console.log("[Daemon] QR Login authorization successful! Credentials saved to SQLite.");
+          break;
+        }
+        case LoginQRCallbackEventType.QRCodeExpired: {
+          db.prepare(`
+            UPDATE zalo_sessions
+            SET status = 'DISCONNECTED', error_message = 'QR Code Expired'
+            WHERE key = 'bot_session'
+          `).run();
+          console.log("[Daemon] QR Code expired.");
+          break;
+        }
+        case LoginQRCallbackEventType.QRCodeDeclined: {
+          db.prepare(`
+            UPDATE zalo_sessions
+            SET status = 'DISCONNECTED', error_message = 'QR Login Declined'
+            WHERE key = 'bot_session'
+          `).run();
+          console.log("[Daemon] QR Login declined by user.");
+          break;
+        }
+      }
+    });
+
+    apiInstance = api;
+    isStartingQR = false;
+    setupListener(apiInstance);
+    startNotificationScheduler();
+  } catch (err) {
+    console.error("[Daemon] QR Login error:", err.message);
+    db.prepare(`
+      UPDATE zalo_sessions
+      SET status = 'DISCONNECTED', error_message = ?
+      WHERE key = 'bot_session'
+    `).run(err.message);
+    isStartingQR = false;
+    
+    // Retry QR flow after 10 seconds
+    setTimeout(startQRLoginFlow, 10000);
+  }
+}
+
+/**
+ * Sets up incoming event listener on Zalo
+ */
+function setupListener(api) {
+  console.log("[Daemon] Setting up Zalo incoming message listener...");
+  
+  api.listener.on("message", async (message) => {
+    // Only handle personal incoming messages from others
+    if (message.isSelf) return;
+    
+    const content = message.data.content;
+    const threadId = message.threadId;
+    
+    if (typeof content !== "string") return;
+    
+    const text = content.trim();
+    console.log(`[Daemon] Message from thread ${threadId}: "${text}"`);
+    
+    if (text.toUpperCase().startsWith("DK ")) {
+      const studentId = text.substring(3).trim();
+      if (!studentId) {
+        await api.sendMessage({ text: "Cú pháp không hợp lệ. Vui lòng nhắn: DK [MSSV/MSCB] (Ví dụ: DK 123000784)" }, threadId);
+        return;
+      }
+      
+      try {
+        // Find if user already registered on web portal
+        const user = db.prepare("SELECT * FROM users WHERE student_id = ?").get(studentId);
+        
+        if (user) {
+          // Update thread ID
+          db.prepare("UPDATE users SET zalo_thread_id = ?, phone = ? WHERE student_id = ?").run(threadId, message.data.uidFrom || "", studentId);
+          
+          const name = user.fullname || "Sinh viên/Giảng viên";
+          await api.sendMessage({ text: `Đăng ký nhận lịch học thành công cho ${name} (Mã: ${studentId})!` }, threadId);
+          console.log(`[Daemon] Registered Zalo Thread ID for student ${studentId}: ${threadId}`);
+          
+          // Instantly sync their schedule
+          await syncUserSchedule(studentId);
+          scheduleUserNotifications(studentId);
+        } else {
+          // User not found on web system. Suggest registering on the web app first.
+          await api.sendMessage({ 
+            text: `Mã số ${studentId} chưa đăng ký tài khoản trên hệ thống Web. Vui lòng truy cập trang Web để tạo tài khoản trước, sau đó gửi tin nhắn cú pháp 'DK ${studentId}' để liên kết.` 
+          }, threadId);
+        }
+      } catch (err) {
+        console.error("[Daemon] Error in registration message handler:", err.message);
+        await api.sendMessage({ text: "Có lỗi xảy ra trong quá trình xử lý đăng ký. Vui lòng thử lại sau." }, threadId);
+      }
+    }
+  });
+
+  api.listener.on("friend_event", async (event) => {
+    // Check if event is Friend Request (2)
+    if (event.type === 2) {
+      const friendId = event.data.fromUid;
+      console.log(`[Daemon] Auto-accepting friend request from ${friendId}...`);
+      try {
+        await api.acceptFriendRequest(friendId);
+        console.log(`[Daemon] Accepted friend request from: ${friendId}`);
+        await api.sendMessage({ 
+          text: "Chào bạn! Mình là Bot nhắc lịch học LHU. Hãy đăng ký tài khoản trên Web, sau đó gửi tin nhắn cú pháp 'DK [MSSV/MSCB]' (ví dụ: DK 123000784) để nhận tin nhắn thông báo nhắc lịch học tự động nhé!" 
+        }, friendId);
+      } catch (err) {
+        console.error(`[Daemon] Friend request accept error for ${friendId}:`, err.message);
+      }
+    }
+  });
+
+  api.listener.start();
+  console.log("[Daemon] Zalo listener started.");
+}
+
+/**
+ * Calculates scheduled times and insert reminders into queue_notifications for a user
+ */
+function scheduleUserNotifications(studentId) {
+  try {
+    const user = db.prepare("SELECT * FROM users WHERE student_id = ?").get(studentId);
+    if (!user || !user.zalo_thread_id) return;
+
+    // Get all schedules
+    const schedules = db.prepare("SELECT * FROM schedules WHERE student_id = ?").all(studentId);
+    
+    const insertQueue = db.prepare(`
+      INSERT INTO queue_notifications (student_id, zalo_thread_id, message, scheduled_time, status)
+      VALUES (?, ?, ?, ?, 'PENDING')
+    `);
+
+    const checkExists = db.prepare(`
+      SELECT count(*) as count FROM queue_notifications 
+      WHERE student_id = ? AND scheduled_time = ? AND message LIKE ?
+    `);
+
+    for (const sch of schedules) {
+      // 1. Remind before class
+      const [classHour, classMin] = sch.time_start.split(":").map(Number);
+      const classDate = new Date(sch.date);
+      classDate.setHours(classHour, classMin, 0);
+
+      const reminderTime = new Date(classDate.getTime() - user.receive_time_before_mins * 60000);
+      const now = new Date();
+
+      if (reminderTime > now) {
+        const scheduledTimeStr = formatLocalTime(reminderTime);
+        const msgText = `[LHU] Nhắc lịch học: Môn '${sch.subject_name}' sẽ bắt đầu lúc ${sch.time_start} tại phòng ${sch.room} (GV: ${sch.teacher}, Lớp: ${sch.class_name || 'Chưa rõ'}).`;
+        
+        const exists = checkExists.get(studentId, scheduledTimeStr, `%Nhắc lịch học: Môn '${sch.subject_name}'%`);
+        if (exists.count === 0) {
+          insertQueue.run(studentId, user.zalo_thread_id, msgText, scheduledTimeStr);
+          console.log(`[Daemon] Queued class reminder for ${studentId} at ${scheduledTimeStr}`);
+        }
+      }
+
+      // 2. Remind night before class
+      if (user.receive_night_before === 1) {
+        const nightBeforeDate = new Date(sch.date);
+        nightBeforeDate.setDate(nightBeforeDate.getDate() - 1);
+        nightBeforeDate.setHours(20, 0, 0); // 8:00 PM the night before
+
+        if (nightBeforeDate > now) {
+          const scheduledTimeStr = formatLocalTime(nightBeforeDate);
+          const msgText = `[LHU] Nhắc lịch học ngày mai (${sch.date}): Môn '${sch.subject_name}' bắt đầu lúc ${sch.time_start} tại phòng ${sch.room} (GV: ${sch.teacher}).`;
+          
+          const exists = checkExists.get(studentId, scheduledTimeStr, `%ngày mai (${sch.date}): Môn '${sch.subject_name}'%`);
+          if (exists.count === 0) {
+            insertQueue.run(studentId, user.zalo_thread_id, msgText, scheduledTimeStr);
+            console.log(`[Daemon] Queued night-before reminder for ${studentId} at ${scheduledTimeStr}`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[Daemon] Error scheduling notifications for ${studentId}:`, err.message);
+  }
+}
+
+/**
+ * Runs a scheduler to sync and queue notifications
+ */
+function startNotificationScheduler() {
+  console.log("[Daemon] Starting Notification Scheduler loops...");
+
+  // 1. Process Outgoing Notification Queue every 10 seconds
+  setInterval(async () => {
+    if (!apiInstance) return;
+    
+    try {
+      const nowStr = formatLocalTime(new Date());
+      // Select pending notifications scheduled for now or earlier
+      const pendings = db.prepare(`
+        SELECT * FROM queue_notifications 
+        WHERE status = 'PENDING' AND scheduled_time <= ?
+      `).all(nowStr);
+
+      for (const noti of pendings) {
+        console.log(`[Daemon] Sending notification to ${noti.zalo_thread_id}: "${noti.message}"`);
+        try {
+          await apiInstance.sendMessage({ text: noti.message }, noti.zalo_thread_id);
+          db.prepare(`
+            UPDATE queue_notifications 
+            SET status = 'SENT', sent_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+          `).run(noti.id);
+          console.log(`[Daemon] Notification ID ${noti.id} sent successfully.`);
+        } catch (err) {
+          console.error(`[Daemon] Failed to send notification ID ${noti.id}:`, err.message);
+          db.prepare(`
+            UPDATE queue_notifications 
+            SET status = 'FAILED', error_message = ?, sent_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+          `).run(err.message, noti.id);
+        }
+      }
+    } catch (err) {
+      console.error("[Daemon] Queue poll loop error:", err.message);
+    }
+  }, 10000);
+
+  // 2. Perform Hourly LHU sync and Notification Queuing for all active users
+  const performSyncAndSchedule = async () => {
+    console.log("[Daemon] Hourly sync job starting...");
+    try {
+      const activeUsers = db.prepare("SELECT student_id FROM users WHERE zalo_thread_id IS NOT NULL").all();
+      for (const u of activeUsers) {
+        try {
+          await syncUserSchedule(u.student_id);
+          scheduleUserNotifications(u.student_id);
+        } catch (syncErr) {
+          console.error(`[Daemon] Hourly sync failed for student ${u.student_id}:`, syncErr.message);
+        }
+      }
+      console.log("[Daemon] Hourly sync job completed.");
+    } catch (err) {
+      console.error("[Daemon] Hourly sync manager error:", err.message);
+    }
+  };
+
+  // Run immediately upon starting scheduler
+  performSyncAndSchedule();
+  // Loop hourly (3600000ms)
+  setInterval(performSyncAndSchedule, 3600000);
+}
+
+// Start daemon process
+startDaemon().catch((err) => {
+  console.error("[Daemon] Fatal initialization error:", err);
+});
