@@ -333,8 +333,14 @@ function scheduleUserNotifications(studentId) {
       WHERE student_id = ? AND status = 'PENDING' AND message LIKE '[LHU] Nhắc lịch học%'
     `).run(studentId);
 
-    // Get all schedules
-    const schedules = db.prepare("SELECT * FROM schedules WHERE student_id = ?").all(studentId);
+    // Get upcoming schedules limited to 30 sessions
+    const todayStr = new Date().toISOString().split("T")[0];
+    const schedules = db.prepare(`
+      SELECT * FROM schedules 
+      WHERE student_id = ? AND date >= ? 
+      ORDER BY date ASC, time_start ASC 
+      LIMIT 30
+    `).all(studentId, todayStr);
     
     const insertQueue = db.prepare(`
       INSERT INTO queue_notifications (student_id, zalo_thread_id, message, scheduled_time, status)
@@ -390,6 +396,45 @@ function scheduleUserNotifications(studentId) {
 }
 
 /**
+ * Prunes sent and failed notifications to keep DB size bounded.
+ * - Keeps at most 10 recent SENT notifications.
+ * - Keeps FAILED notifications only within the past 7 days, and at most 10 total.
+ */
+function pruneNotifications(studentId) {
+  try {
+    // 1. Delete FAILED notifications older than 7 days
+    db.prepare(`
+      DELETE FROM queue_notifications 
+      WHERE student_id = ? AND status = 'FAILED' AND sent_at < datetime('now', '-7 days')
+    `).run(studentId);
+
+    // 2. Keep only the 10 most recent SENT notifications
+    db.prepare(`
+      DELETE FROM queue_notifications 
+      WHERE student_id = ? AND status = 'SENT' AND id NOT IN (
+        SELECT id FROM queue_notifications 
+        WHERE student_id = ? AND status = 'SENT' 
+        ORDER BY sent_at DESC, id DESC 
+        LIMIT 10
+      )
+    `).run(studentId, studentId);
+
+    // 3. Keep only the 10 most recent FAILED notifications
+    db.prepare(`
+      DELETE FROM queue_notifications 
+      WHERE student_id = ? AND status = 'FAILED' AND id NOT IN (
+        SELECT id FROM queue_notifications 
+        WHERE student_id = ? AND status = 'FAILED' 
+        ORDER BY sent_at DESC, id DESC 
+        LIMIT 10
+      )
+    `).run(studentId, studentId);
+  } catch (err) {
+    console.error(`[Daemon] Error pruning notifications for ${studentId}:`, err.message);
+  }
+}
+
+/**
  * Runs a scheduler to sync and queue notifications
  */
 function startNotificationScheduler() {
@@ -421,6 +466,7 @@ function startNotificationScheduler() {
             WHERE id = ?
           `).run(noti.id);
           console.log(`[Daemon] Notification ID ${noti.id} sent successfully.`);
+          pruneNotifications(noti.student_id);
         } catch (err) {
           console.error(`[Daemon] Failed to send notification ID ${noti.id}:`, err.message);
           db.prepare(`
@@ -428,6 +474,7 @@ function startNotificationScheduler() {
             SET status = 'FAILED', error_message = ?, sent_at = CURRENT_TIMESTAMP 
             WHERE id = ?
           `).run(err.message, noti.id);
+          pruneNotifications(noti.student_id);
         }
       }
     } catch (err) {
