@@ -46,10 +46,14 @@ export default function AdminLoginPage() {
     <div className="app-container">
       <header className="app-header">
         <Link href="/" className="app-brand">
-          <span>🔔</span> LHU Schedule Bot
+          <span>🔔</span> LHU Bot <span className="brand-subtext">Schedule</span>
         </Link>
-        <Link href="/" className="btn btn-secondary">
-          Quay lại trang chủ
+        <Link href="/" className="btn btn-secondary nav-btn" title="Quay lại trang chủ">
+          <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <polyline points="9 22 9 12 15 12 15 22" />
+          </svg>
+          <span className="nav-btn-text">Quay lại trang chủ</span>
         </Link>
       </header>
 

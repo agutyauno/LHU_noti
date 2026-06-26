@@ -14,7 +14,6 @@ export default function Dashboard() {
   const [saving, setSaving] = useState(false);
 
   // Settings states
-  const [phone, setPhone] = useState("");
   const [receiveTimeBefore, setReceiveTimeBefore] = useState(60);
   const [receiveNightBefore, setReceiveNightBefore] = useState(1);
   const [message, setMessage] = useState("");
@@ -30,7 +29,6 @@ export default function Dashboard() {
       setSchedules(data.schedules);
       setNotifications(data.notifications);
       
-      setPhone(data.user.phone || "");
       setReceiveTimeBefore(data.user.receive_time_before_mins);
       setReceiveNightBefore(data.user.receive_night_before);
     } catch (err) {
@@ -68,9 +66,8 @@ export default function Dashboard() {
         body: JSON.stringify({
           action: "update_settings",
           student_id: user.student_id,
-          receive_time_before_mins: parseInt(receiveTimeBefore),
-          receive_night_before: parseInt(receiveNightBefore),
-          phone
+          receive_time_before_mins: parseInt(receiveTimeBefore) || 60,
+          receive_night_before: parseInt(receiveNightBefore)
         })
       });
 
@@ -133,12 +130,17 @@ export default function Dashboard() {
     <div className="app-container">
       <header className="app-header">
         <Link href="/" className="app-brand">
-          <span>🔔</span> LHU Schedule Bot
+          <span>🔔</span> LHU Bot <span className="brand-subtext">Schedule</span>
         </Link>
         <div className="app-nav">
-          <span style={{ fontWeight: "600", color: "var(--text-secondary)" }}>Xin chào, {user?.fullname}</span>
-          <button onClick={handleLogout} className="btn btn-secondary">
-            Đăng xuất
+          <span className="user-welcome"><span className="welcome-prefix">Xin chào, </span>{user?.fullname}</span>
+          <button onClick={handleLogout} className="btn btn-secondary nav-btn" title="Đăng xuất">
+            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            <span className="nav-btn-text">Đăng xuất</span>
           </button>
         </div>
       </header>
@@ -196,30 +198,19 @@ export default function Dashboard() {
           <div className="card">
             <h2>Cấu Hình Nhắc Lịch</h2>
             <form onSubmit={handleSaveSettings}>
-              <div className="form-group">
-                <label className="form-label">Số điện thoại Zalo (Tùy chọn)</label>
-                <input 
-                  type="text" 
-                  className="form-control" 
-                  value={phone} 
-                  onChange={(e) => setPhone(e.target.value)} 
-                  placeholder="09xxxxxxxx"
-                />
-              </div>
 
               <div className="form-group">
                 <label className="form-label">Thời gian nhắc trước khi học (Phút)</label>
-                <select 
+                <input 
+                  type="number" 
                   className="form-control" 
                   value={receiveTimeBefore} 
-                  onChange={(e) => setReceiveTimeBefore(e.target.value)}
-                >
-                  <option value={15}>Trước 15 phút</option>
-                  <option value={30}>Trước 30 phút</option>
-                  <option value={45}>Trước 450 phút</option>
-                  <option value={60}>Trước 1 tiếng (Khuyên dùng)</option>
-                  <option value={120}>Trước 2 tiếng</option>
-                </select>
+                  onChange={(e) => setReceiveTimeBefore(e.target.value)} 
+                  min="5"
+                  max="1440"
+                  required
+                  placeholder="Nhập số phút, ví dụ: 60"
+                />
               </div>
 
               <div className="form-group" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem", marginTop: "1rem", marginBottom: "1.5rem" }}>

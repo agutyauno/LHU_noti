@@ -40,7 +40,7 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
-    const { action, student_id, receive_time_before_mins, receive_night_before, phone } = await request.json();
+    const { action, student_id, receive_time_before_mins, receive_night_before } = await request.json();
 
     if (!student_id) {
       return Response.json({ error: "Thiếu student_id" }, { status: 400 });
@@ -49,9 +49,9 @@ export async function POST(request) {
     if (action === "update_settings") {
       db.prepare(`
         UPDATE users 
-        SET receive_time_before_mins = ?, receive_night_before = ?, phone = ?
+        SET receive_time_before_mins = ?, receive_night_before = ?
         WHERE student_id = ?
-      `).run(receive_time_before_mins, receive_night_before, phone || "", student_id);
+      `).run(receive_time_before_mins, receive_night_before, student_id);
 
       const user = db.prepare("SELECT * FROM users WHERE student_id = ?").get(student_id);
       const { password_hash, ...userInfo } = user;

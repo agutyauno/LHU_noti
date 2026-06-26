@@ -10,6 +10,9 @@ dotenv.config();
 
 let apiInstance = null;
 let isStartingQR = false;
+let currentFlowId = 0;
+let queueIntervalId = null;
+let syncIntervalId = null;
 
 // Format helper for dates
 const formatLocalTime = (date) => {
@@ -25,15 +28,44 @@ const formatLocalTime = (date) => {
 
 /**
  * Periodically updates the bot heartbeat in SQLite so Next.js knows it is active.
+ * Also checks if the Web UI requested a bot reset/logout.
  */
 function runHeartbeat() {
-  setInterval(() => {
+  setInterval(async () => {
     try {
+      // 1. Update heartbeat
       db.prepare(`
         UPDATE zalo_sessions
         SET updated_at = CURRENT_TIMESTAMP
         WHERE key = 'bot_session'
       `).run();
+
+      // 2. Check if bot logout was requested from the Web Dashboard or status is DISCONNECTED
+      const session = db.prepare("SELECT status FROM zalo_sessions WHERE key = 'bot_session'").get();
+      if (session && session.status === 'DISCONNECTED') {
+        console.log("[Daemon] Web UI requested a bot reset or status is DISCONNECTED. Starting QR Login Flow...");
+        
+        // Stop listener if running
+        if (apiInstance) {
+          try {
+            if (apiInstance.listener) {
+              apiInstance.listener.stop();
+            }
+          } catch (e) {
+            console.error("[Daemon] Error stopping listener:", e.message);
+          }
+          apiInstance = null;
+        }
+
+        // Clear intervals
+        if (queueIntervalId) clearInterval(queueIntervalId);
+        if (syncIntervalId) clearInterval(syncIntervalId);
+        queueIntervalId = null;
+        syncIntervalId = null;
+
+        // Automatically force-start the QR login flow
+        startQRLoginFlow(true);
+      }
     } catch (err) {
       console.error("[Daemon] Heartbeat update failed:", err.message);
     }
@@ -103,9 +135,12 @@ async function startDaemon() {
 /**
  * Initiates the QR Login Flow
  */
-async function startQRLoginFlow() {
-  if (isStartingQR) return;
+async function startQRLoginFlow(force = false) {
+  if (isStartingQR && !force) return;
   isStartingQR = true;
+  
+  currentFlowId++;
+  const flowId = currentFlowId;
   
   db.prepare(`
     INSERT OR REPLACE INTO zalo_sessions (key, status, qr_code_data, error_message)
@@ -127,6 +162,11 @@ async function startQRLoginFlow() {
 
   try {
     const api = await zalo.loginQR({}, async (event) => {
+      if (flowId !== currentFlowId) {
+        console.log(`[Daemon] Ignoring event from obsolete QR flow ${flowId}`);
+        return;
+      }
+      
       switch (event.type) {
         case LoginQRCallbackEventType.QRCodeGenerated: {
           const qrBase64 = event.data.image.startsWith("data:") ? event.data.image : `data:image/png;base64,${event.data.image}`;
@@ -178,11 +218,21 @@ async function startQRLoginFlow() {
       }
     });
 
+    if (flowId !== currentFlowId) {
+      console.log(`[Daemon] Ignoring API resolution from obsolete QR flow ${flowId}`);
+      return;
+    }
+
     apiInstance = api;
     isStartingQR = false;
     setupListener(apiInstance);
     startNotificationScheduler();
   } catch (err) {
+    if (flowId !== currentFlowId) {
+      console.log(`[Daemon] Ignoring error from obsolete QR flow ${flowId}`);
+      return;
+    }
+    
     console.error("[Daemon] QR Login error:", err.message);
     db.prepare(`
       UPDATE zalo_sessions
@@ -190,9 +240,6 @@ async function startQRLoginFlow() {
       WHERE key = 'bot_session'
     `).run(err.message);
     isStartingQR = false;
-    
-    // Retry QR flow after 10 seconds
-    setTimeout(startQRLoginFlow, 10000);
   }
 }
 
@@ -217,7 +264,7 @@ function setupListener(api) {
     if (text.toUpperCase().startsWith("DK ")) {
       const studentId = text.substring(3).trim();
       if (!studentId) {
-        await api.sendMessage({ text: "Cú pháp không hợp lệ. Vui lòng nhắn: DK [MSSV/MSCB] (Ví dụ: DK 123000784)" }, threadId);
+        await api.sendMessage("Cú pháp không hợp lệ. Vui lòng nhắn: DK [MSSV/MSCB] (Ví dụ: DK 123000784)", threadId);
         return;
       }
       
@@ -227,10 +274,10 @@ function setupListener(api) {
         
         if (user) {
           // Update thread ID
-          db.prepare("UPDATE users SET zalo_thread_id = ?, phone = ? WHERE student_id = ?").run(threadId, message.data.uidFrom || "", studentId);
+          db.prepare("UPDATE users SET zalo_thread_id = ? WHERE student_id = ?").run(threadId, studentId);
           
           const name = user.fullname || "Sinh viên/Giảng viên";
-          await api.sendMessage({ text: `Đăng ký nhận lịch học thành công cho ${name} (Mã: ${studentId})!` }, threadId);
+          await api.sendMessage(`Đăng ký nhận lịch học thành công cho ${name} (Mã: ${studentId})!`, threadId);
           console.log(`[Daemon] Registered Zalo Thread ID for student ${studentId}: ${threadId}`);
           
           // Instantly sync their schedule
@@ -238,13 +285,14 @@ function setupListener(api) {
           scheduleUserNotifications(studentId);
         } else {
           // User not found on web system. Suggest registering on the web app first.
-          await api.sendMessage({ 
-            text: `Mã số ${studentId} chưa đăng ký tài khoản trên hệ thống Web. Vui lòng truy cập trang Web để tạo tài khoản trước, sau đó gửi tin nhắn cú pháp 'DK ${studentId}' để liên kết.` 
-          }, threadId);
+          await api.sendMessage(
+            `Mã số ${studentId} chưa đăng ký tài khoản trên hệ thống Web. Vui lòng truy cập trang Web để tạo tài khoản trước, sau đó gửi tin nhắn cú pháp 'DK ${studentId}' để liên kết.`, 
+            threadId
+          );
         }
       } catch (err) {
         console.error("[Daemon] Error in registration message handler:", err.message);
-        await api.sendMessage({ text: "Có lỗi xảy ra trong quá trình xử lý đăng ký. Vui lòng thử lại sau." }, threadId);
+        await api.sendMessage("Có lỗi xảy ra trong quá trình xử lý đăng ký. Vui lòng thử lại sau.", threadId);
       }
     }
   });
@@ -257,9 +305,10 @@ function setupListener(api) {
       try {
         await api.acceptFriendRequest(friendId);
         console.log(`[Daemon] Accepted friend request from: ${friendId}`);
-        await api.sendMessage({ 
-          text: "Chào bạn! Mình là Bot nhắc lịch học LHU. Hãy đăng ký tài khoản trên Web, sau đó gửi tin nhắn cú pháp 'DK [MSSV/MSCB]' (ví dụ: DK 123000784) để nhận tin nhắn thông báo nhắc lịch học tự động nhé!" 
-        }, friendId);
+        await api.sendMessage(
+          "Chào bạn! Mình là Bot nhắc lịch học LHU. Hãy đăng ký tài khoản trên Web, sau đó gửi tin nhắn cú pháp 'DK [MSSV/MSCB]' (ví dụ: DK 123000784) để nhận tin nhắn thông báo nhắc lịch học tự động nhé!", 
+          friendId
+        );
       } catch (err) {
         console.error(`[Daemon] Friend request accept error for ${friendId}:`, err.message);
       }
@@ -277,6 +326,12 @@ function scheduleUserNotifications(studentId) {
   try {
     const user = db.prepare("SELECT * FROM users WHERE student_id = ?").get(studentId);
     if (!user || !user.zalo_thread_id) return;
+
+    // Clean up future PENDING reminders first
+    db.prepare(`
+      DELETE FROM queue_notifications 
+      WHERE student_id = ? AND status = 'PENDING' AND message LIKE '[LHU] Nhắc lịch học%'
+    `).run(studentId);
 
     // Get all schedules
     const schedules = db.prepare("SELECT * FROM schedules WHERE student_id = ?").all(studentId);
@@ -338,10 +393,14 @@ function scheduleUserNotifications(studentId) {
  * Runs a scheduler to sync and queue notifications
  */
 function startNotificationScheduler() {
+  // Clear any existing intervals to prevent duplicates
+  if (queueIntervalId) clearInterval(queueIntervalId);
+  if (syncIntervalId) clearInterval(syncIntervalId);
+
   console.log("[Daemon] Starting Notification Scheduler loops...");
 
   // 1. Process Outgoing Notification Queue every 10 seconds
-  setInterval(async () => {
+  queueIntervalId = setInterval(async () => {
     if (!apiInstance) return;
     
     try {
@@ -355,7 +414,7 @@ function startNotificationScheduler() {
       for (const noti of pendings) {
         console.log(`[Daemon] Sending notification to ${noti.zalo_thread_id}: "${noti.message}"`);
         try {
-          await apiInstance.sendMessage({ text: noti.message }, noti.zalo_thread_id);
+          await apiInstance.sendMessage(noti.message, noti.zalo_thread_id);
           db.prepare(`
             UPDATE queue_notifications 
             SET status = 'SENT', sent_at = CURRENT_TIMESTAMP 
@@ -376,9 +435,9 @@ function startNotificationScheduler() {
     }
   }, 10000);
 
-  // 2. Perform Hourly LHU sync and Notification Queuing for all active users
+  // 2. Perform Periodic LHU sync and Notification Queuing for all active users (every 5 minutes)
   const performSyncAndSchedule = async () => {
-    console.log("[Daemon] Hourly sync job starting...");
+    console.log("[Daemon] Periodic sync job starting...");
     try {
       const activeUsers = db.prepare("SELECT student_id FROM users WHERE zalo_thread_id IS NOT NULL").all();
       for (const u of activeUsers) {
@@ -386,19 +445,19 @@ function startNotificationScheduler() {
           await syncUserSchedule(u.student_id);
           scheduleUserNotifications(u.student_id);
         } catch (syncErr) {
-          console.error(`[Daemon] Hourly sync failed for student ${u.student_id}:`, syncErr.message);
+          console.error(`[Daemon] Periodic sync failed for student ${u.student_id}:`, syncErr.message);
         }
       }
-      console.log("[Daemon] Hourly sync job completed.");
+      console.log("[Daemon] Periodic sync job completed.");
     } catch (err) {
-      console.error("[Daemon] Hourly sync manager error:", err.message);
+      console.error("[Daemon] Periodic sync manager error:", err.message);
     }
   };
 
   // Run immediately upon starting scheduler
   performSyncAndSchedule();
-  // Loop hourly (3600000ms)
-  setInterval(performSyncAndSchedule, 3600000);
+  // Loop every 5 minutes (300000ms)
+  syncIntervalId = setInterval(performSyncAndSchedule, 300000);
 }
 
 // Start daemon process

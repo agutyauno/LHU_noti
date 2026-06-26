@@ -9,7 +9,7 @@ export async function GET() {
 
     // Fetch all users and order by registration time
     const users = db.prepare(`
-      SELECT id, username, student_id, fullname, phone, zalo_thread_id, created_at 
+      SELECT id, username, student_id, fullname, zalo_thread_id, created_at 
       FROM users 
       ORDER BY created_at DESC
     `).all();

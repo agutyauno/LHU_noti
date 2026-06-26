@@ -25,7 +25,7 @@ export default function Home() {
             ✨ Giải pháp đồng bộ thời khóa biểu tự động qua Zalo
           </div>
 
-          <h1 style={{ fontSize: "3.5rem", marginBottom: "1.5rem" }}>
+          <h1 className="hero-title" style={{ marginBottom: "1.5rem" }}>
             Không Bao Giờ Trễ Học Với Nhắc Lịch Zalo
           </h1>
 
@@ -33,11 +33,11 @@ export default function Home() {
             Hệ thống tự động đồng bộ thời khóa biểu từ trang LHU và gửi tin nhắn nhắc lịch học chi tiết trực tiếp vào Zalo cá nhân của bạn. Cài đặt thời gian nhắc nhở linh hoạt theo ý muốn.
           </p>
 
-          <div style={{ display: "flex", gap: "1rem", justifyContent: "center" }}>
-            <Link href="/auth" className="btn btn-primary" style={{ padding: "1rem 2.5rem", fontSize: "1.1rem" }}>
+          <div className="hero-buttons">
+            <Link href="/auth" className="btn btn-primary hero-btn">
               Bắt đầu đăng ký ngay ⚡
             </Link>
-            <Link href="/admin" className="btn btn-secondary" style={{ padding: "1rem 2.5rem", fontSize: "1.1rem" }}>
+            <Link href="/admin" className="btn btn-secondary hero-btn">
               Bảng quản trị Bot Zalo
             </Link>
           </div>

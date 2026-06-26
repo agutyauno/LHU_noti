@@ -254,13 +254,12 @@ h3 {
 .btn-primary {
   background: var(--accent-gradient);
   color: #ffffff;
-  box-shadow: var(--shadow-sm);
 }
 
 .btn-primary:hover {
   background: var(--accent-hover);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
+  color: #ffffff;
 }
 
 .btn-secondary {
@@ -425,5 +424,165 @@ h3 {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+
+
+/* Mobile & Tablet Responsiveness System */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.5rem;
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .app-header {
+    padding: 0.75rem 1rem;
+    gap: 0.5rem;
+  }
+
+  .app-brand {
+    font-size: 1.15rem;
+  }
+
+  .app-nav {
+    gap: 0.5rem;
+  }
+
+  .main-content {
+    padding: 1.25rem 1rem;
+  }
+
+  .card {
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+  }
+
+  h1 {
+    font-size: 1.75rem !important;
+  }
+
+  h2 {
+    font-size: 1.35rem !important;
+  }
+
+  h3 {
+    font-size: 1.15rem !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+}
+
+/* Touch scroll smooth styling */
+.table-container {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  .custom-table {
+    min-width: 650px;
+  }
+}
+
+/* Hero Page Responsiveness */
+.hero-title {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.hero-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.hero-btn {
+  padding: 1rem 2.5rem;
+  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+@media (max-width: 640px) {
+  .hero-title {
+    font-size: 2.0rem;
+  }
+
+  .hero-buttons {
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .hero-btn {
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    width: 100%;
+  }
+}
+
+/* Navigation Buttons & Redesigned Header Elements */
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.85rem !important;
+  font-size: 0.9rem !important;
+  border-radius: var(--radius-md) !important;
+  font-weight: 600;
+  transition: var(--transition);
+}
+
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+}
+
+.user-welcome {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .brand-subtext {
+    display: none;
+  }
+
+  .nav-btn-text {
+    display: none;
+  }
+
+  .nav-btn {
+    padding: 0.5rem !important;
+    border-radius: var(--radius-full) !important;
+    width: 36px;
+    height: 36px;
+    justify-content: center;
+  }
+
+  .user-welcome {
+    font-size: 0.8rem;
+  }
+
+  .welcome-prefix {
+    display: none;
   }
 }

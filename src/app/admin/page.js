@@ -25,6 +25,7 @@ export default function AdminPage() {
   const [resetting, setResetting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [showConfirmReset, setShowConfirmReset] = useState(false);
 
   const fetchBotStatus = async () => {
     try {
@@ -77,10 +78,12 @@ export default function AdminPage() {
   }, []);
 
   const handleResetBot = async () => {
-    if (!confirm("Bạn có chắc chắn muốn reset phiên làm việc của Bot? Hành động này sẽ đăng xuất Bot khỏi tài khoản Zalo hiện tại.")) {
+    if (!showConfirmReset) {
+      setShowConfirmReset(true);
       return;
     }
 
+    setShowConfirmReset(false);
     setResetting(true);
     setMessage("");
     setError("");
@@ -133,14 +136,23 @@ export default function AdminPage() {
     <div className="app-container">
       <header className="app-header">
         <Link href="/" className="app-brand">
-          <span>🔔</span> LHU Bot Admin Control
+          <span>🔔</span> LHU Bot <span className="brand-subtext">Admin Control</span>
         </Link>
-        <div className="app-nav" style={{ display: "flex", gap: "1rem" }}>
-          <button onClick={handleLogout} className="btn btn-secondary">
-            Đăng xuất
+        <div className="app-nav">
+          <button onClick={handleLogout} className="btn btn-secondary nav-btn" title="Đăng xuất">
+            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            <span className="nav-btn-text">Đăng xuất</span>
           </button>
-          <Link href="/" className="btn btn-secondary">
-            Quay lại trang chủ
+          <Link href="/" className="btn btn-secondary nav-btn" title="Quay lại trang chủ">
+            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+            <span className="nav-btn-text">Quay lại trang chủ</span>
           </Link>
         </div>
       </header>
@@ -161,7 +173,7 @@ export default function AdminPage() {
         )}
 
         {/* Stats Grid */}
-        <section className="grid-2" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: "2rem" }}>
+        <section className="stats-grid" style={{ marginBottom: "2rem" }}>
           <div className="card" style={{ padding: "1.5rem", textAlign: "center" }}>
             <h3 style={{ fontSize: "2rem", margin: "0.25rem 0", color: "var(--accent)" }}>{stats.total_users}</h3>
             <p style={{ color: "var(--text-secondary)", fontSize: "0.9rem", fontWeight: "600" }}>Tổng tài khoản</p>
@@ -254,17 +266,45 @@ export default function AdminPage() {
                 </div>
               )}
 
-              {/* Bot Control Actions */}
-              <div style={{ marginTop: "1rem" }}>
-                <button 
-                  onClick={handleResetBot} 
-                  className="btn btn-danger" 
-                  style={{ width: "100%" }} 
-                  disabled={resetting || !botState.is_online}
-                >
-                  {resetting ? "Đang xử lý..." : "Reset Phiên Làm Việc Bot (Đăng xuất)"}
-                </button>
-              </div>
+              {/* Bot Control Actions - Only show if Bot is currently CONNECTED */}
+              {botState.status === "CONNECTED" && (
+                <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {showConfirmReset ? (
+                    <>
+                      <div style={{ padding: "0.75rem", backgroundColor: "var(--warning-glow)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: "var(--radius-sm)", color: "var(--warning)", fontSize: "0.9rem", fontWeight: "600", textAlign: "center" }}>
+                        ⚠️ Bạn có chắc chắn muốn đăng xuất Bot khỏi tài khoản Zalo hiện tại?
+                      </div>
+                      <div style={{ display: "flex", gap: "0.5rem" }}>
+                        <button 
+                          onClick={handleResetBot} 
+                          className="btn btn-danger" 
+                          style={{ flex: 1 }} 
+                          disabled={resetting || !botState.is_online}
+                        >
+                          {resetting ? "Đang xử lý..." : "Xác Nhận"}
+                        </button>
+                        <button 
+                          onClick={() => setShowConfirmReset(false)} 
+                          className="btn btn-secondary" 
+                          style={{ flex: 1 }} 
+                          disabled={resetting}
+                        >
+                          Hủy
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <button 
+                      onClick={handleResetBot} 
+                      className="btn btn-danger" 
+                      style={{ width: "100%" }} 
+                      disabled={resetting || !botState.is_online}
+                    >
+                      {resetting ? "Đang xử lý..." : "Reset Phiên Làm Việc Bot (Đăng xuất)"}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -284,7 +324,6 @@ export default function AdminPage() {
                       <th>MSSV/MSCB</th>
                       <th>Tài khoản</th>
                       <th>Zalo Thread ID</th>
-                      <th>Số điện thoại</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -302,7 +341,6 @@ export default function AdminPage() {
                             <span className="badge badge-warning">Chưa kết nối</span>
                           )}
                         </td>
-                        <td>{u.phone || "-"}</td>
                       </tr>
                     ))}
                   </tbody>

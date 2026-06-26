@@ -48,18 +48,24 @@ export async function syncUserSchedule(studentId) {
       }
 
       if (Array.isArray(rawData)) {
-        scheduleList = rawData.map((item, idx) => ({
-          id: String(item.Id || item.ID || item.id || `lhu-${studentId}-${idx}-${Date.now()}`),
-          student_id: studentId,
-          subject_name: item.SubjectName || item.TenMon || item.subject_name || "Môn học không tên",
-          room: item.Room || item.Phong || item.room || "Tự do",
-          teacher: item.Teacher || item.GiaoVien || item.teacher || "Chưa xếp giảng viên",
-          date: item.Date || item.Ngay || item.date || new Date().toISOString().split("T")[0],
-          time_start: item.TimeStart || item.GioBatDau || item.time_start || "07:30",
-          time_end: item.TimeEnd || item.GioKetThuc || item.time_end || "11:00",
-          lesson_nums: String(item.Tiet || item.lesson_nums || ""),
-          class_name: item.ClassName || item.Lop || item.class_name || ""
-        }));
+        scheduleList = rawData.map((item, idx) => {
+          const dateStr = item.ThoiGianBD ? item.ThoiGianBD.split("T")[0] : (item.Date || item.Ngay || item.date || new Date().toISOString().split("T")[0]);
+          const timeStart = item.ThoiGianBD ? item.ThoiGianBD.split("T")[1].substring(0, 5) : (item.TimeStart || item.GioBatDau || item.time_start || "07:30");
+          const timeEnd = item.ThoiGianKT ? item.ThoiGianKT.split("T")[1].substring(0, 5) : (item.TimeEnd || item.GioKetThuc || item.time_end || "11:00");
+
+          return {
+            id: String(item.ID || item.Id || item.id || `lhu-${studentId}-${idx}-${Date.now()}`),
+            student_id: studentId,
+            subject_name: item.TenMonHoc || item.SubjectName || item.TenMon || item.subject_name || "Môn học không tên",
+            room: item.TenPhong || item.Room || item.Phong || item.room || "Tự do",
+            teacher: item.GiaoVien || item.Teacher || item.teacher || "Chưa xếp giảng viên",
+            date: dateStr,
+            time_start: timeStart,
+            time_end: timeEnd,
+            lesson_nums: String(item.Tiet || item.lesson_nums || ""),
+            class_name: item.TenNhom || item.ClassName || item.Lop || item.class_name || ""
+          };
+        });
       }
     } catch (err) {
       console.error(`[LHU Sync] Error calling real LHU API, falling back to mock:`, err.message);
@@ -67,7 +73,75 @@ export async function syncUserSchedule(studentId) {
     }
   }
 
-  // Upsert into schedules SQLite table
+  const todayStr = new Date().toISOString().split("T")[0];
+
+  // 1. Get existing future schedules for this student from DB (today and future)
+  const existingSchedules = db.prepare(`
+    SELECT * FROM schedules 
+    WHERE student_id = ? AND date >= ?
+  `).all(studentId, todayStr);
+
+  const existingMap = new Map(existingSchedules.map(s => [s.id, s]));
+  const detectedChanges = [];
+
+  // Get Zalo thread ID if user is linked, to prepare Zalo notifications
+  const user = db.prepare("SELECT zalo_thread_id FROM users WHERE student_id = ?").get(studentId);
+  const threadId = user ? user.zalo_thread_id : null;
+
+  for (const s of scheduleList) {
+    if (existingMap.has(s.id)) {
+      const oldS = existingMap.get(s.id);
+      existingMap.delete(s.id); // Remove from map so we know it's still present in the API
+
+      // Compare details
+      const diffs = [];
+      if (oldS.room !== s.room) diffs.push(`Phòng học: ${oldS.room} ➜ ${s.room}`);
+      if (oldS.teacher !== s.teacher) diffs.push(`Giảng viên: ${oldS.teacher} ➜ ${s.teacher}`);
+      if (oldS.date !== s.date) diffs.push(`Ngày học: ${oldS.date} ➜ ${s.date}`);
+      if (oldS.time_start !== s.time_start || oldS.time_end !== s.time_end) {
+        diffs.push(`Giờ học: ${oldS.time_start}-${oldS.time_end} ➜ ${s.time_start}-${s.time_end}`);
+      }
+
+      if (diffs.length > 0) {
+        detectedChanges.push({
+          type: "MODIFIED",
+          schedule: s,
+          diffs: diffs
+        });
+
+        // Delete future pending notifications for this modified schedule to rebuild them later
+        if (threadId) {
+          db.prepare(`
+            DELETE FROM queue_notifications 
+            WHERE student_id = ? AND status = 'PENDING' AND message LIKE ?
+          `).run(studentId, `%${s.subject_name}%`);
+        }
+      }
+    } else {
+      // Newly added schedule - no immediate notification needed as per user request
+    }
+  }
+
+  // Any remaining schedules in existingMap are canceled/deleted in the API
+  for (const [id, oldS] of existingMap.entries()) {
+    detectedChanges.push({
+      type: "CANCELED",
+      schedule: oldS
+    });
+
+    // Delete future pending notifications for this canceled schedule
+    if (threadId) {
+      db.prepare(`
+        DELETE FROM queue_notifications 
+        WHERE student_id = ? AND status = 'PENDING' AND message LIKE ?
+      `).run(studentId, `%${oldS.subject_name}%`);
+    }
+
+    // Delete the canceled schedule from DB
+    db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+  }
+
+  // Insert/Update schedules in SQLite
   const insertStmt = db.prepare(`
     INSERT OR REPLACE INTO schedules (id, student_id, subject_name, room, teacher, date, time_start, time_end, lesson_nums, class_name)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -92,6 +166,43 @@ export async function syncUserSchedule(studentId) {
 
   transaction(scheduleList);
   console.log(`[LHU Sync] Successfully synchronized ${scheduleList.length} schedules for student ${studentId}.`);
+
+  // Insert change notifications into queue_notifications if there's an active Zalo thread
+  if (threadId && detectedChanges.length > 0) {
+    const formatLocalTime = (date) => {
+      const pad = (num) => String(num).padStart(2, '0');
+      const y = date.getFullYear();
+      const m = pad(date.getMonth() + 1);
+      const d = pad(date.getDate());
+      const h = pad(date.getHours());
+      const min = pad(date.getMinutes());
+      const s = pad(date.getSeconds());
+      return `${y}-${m}-${d} ${h}:${min}:${s}`;
+    };
+    const nowStr = formatLocalTime(new Date());
+
+    const insertQueue = db.prepare(`
+      INSERT INTO queue_notifications (student_id, zalo_thread_id, message, scheduled_time, status)
+      VALUES (?, ?, ?, ?, 'PENDING')
+    `);
+
+    for (const c of detectedChanges) {
+      let msg = "";
+      if (c.type === "ADDED") {
+        msg = `[LHU] Lịch học mới:\nMôn: '${c.schedule.subject_name}'\nNgày: ${c.schedule.date}\nGiờ: ${c.schedule.time_start} - ${c.schedule.time_end}\nPhòng: ${c.schedule.room}\nGV: ${c.schedule.teacher}`;
+      } else if (c.type === "MODIFIED") {
+        msg = `[LHU] Thay đổi lịch học:\nMôn: '${c.schedule.subject_name}' ngày ${c.schedule.date}\nChi tiết thay đổi:\n${c.diffs.map(d => `- ${d}`).join("\n")}`;
+      } else if (c.type === "CANCELED") {
+        msg = `[LHU] Hủy lịch học:\nMôn: '${c.schedule.subject_name}' ngày ${c.schedule.date} (Lớp: ${c.schedule.class_name || 'Chưa rõ'}) đã bị hủy.`;
+      }
+
+      if (msg) {
+        insertQueue.run(studentId, threadId, msg, nowStr);
+        console.log(`[LHU Sync] Queued instant change notification (${c.type}) for ${studentId}`);
+      }
+    }
+  }
+
   return scheduleList;
 }
 
@@ -110,11 +221,9 @@ function generateMockSchedules(studentId) {
     return `${y}-${m}-${r}`;
   };
 
-  // Schedule 1: Today, starting in 20 minutes
-  const class1Time = new Date(today.getTime() + 20 * 60 * 1000);
-  const timeStart1 = `${String(class1Time.getHours()).padStart(2, '0')}:${String(class1Time.getMinutes()).padStart(2, '0')}`;
-  const end1Time = new Date(class1Time.getTime() + 90 * 60 * 1000); // 1.5h class
-  const timeEnd1 = `${String(end1Time.getHours()).padStart(2, '0')}:${String(end1Time.getMinutes()).padStart(2, '0')}`;
+  // Schedule 1: Today, starting at 07:30 (static)
+  const timeStart1 = "07:30";
+  const timeEnd1 = "09:00";
 
   // Schedule 2: Tomorrow morning at 07:30
   const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
@@ -154,6 +263,42 @@ function generateMockSchedules(studentId) {
       time_start: "16:15",
       time_end: "18:50",
       lesson_nums: "11 - 15",
+      class_name: "22DTH1"
+    },
+    {
+      id: `mock-4-${formatDate(today)}-${studentId}`,
+      student_id: studentId,
+      subject_name: "Lập trình Web nâng cao",
+      room: "I.304",
+      teacher: "ThS. Hoàng Thị C",
+      date: formatDate(today),
+      time_start: "10:16",
+      time_end: "12:40",
+      lesson_nums: "6 - 9",
+      class_name: "22DTH1"
+    },
+    {
+      id: `mock-5-${formatDate(today)}-${studentId}`,
+      student_id: studentId,
+      subject_name: "Lập trình Web nâng cao",
+      room: "I.304",
+      teacher: "ThS. Hoàng Thị C",
+      date: formatDate(today),
+      time_start: "10:24",
+      time_end: "12:40",
+      lesson_nums: "6 - 9",
+      class_name: "22DTH1"
+    },
+    {
+      id: `mock-6-${formatDate(today)}-${studentId}`,
+      student_id: studentId,
+      subject_name: "Lập trình Web 2",
+      room: "I.304",
+      teacher: "ThS. Hoàng Thị C",
+      date: formatDate(today),
+      time_start: "15:05",
+      time_end: "15:40",
+      lesson_nums: "6 - 9",
       class_name: "22DTH1"
     }
   ];
