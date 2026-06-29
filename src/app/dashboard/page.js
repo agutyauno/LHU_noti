@@ -9,6 +9,7 @@ export default function Dashboard() {
   const [user, setUser] = useState(null);
   const [schedules, setSchedules] = useState([]);
   const [notifications, setNotifications] = useState([]);
+  const [botProfile, setBotProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -28,6 +29,7 @@ export default function Dashboard() {
       setUser(data.user);
       setSchedules(data.schedules);
       setNotifications(data.notifications);
+      setBotProfile(data.bot_profile);
       
       setReceiveTimeBefore(data.user.receive_time_before_mins);
       setReceiveNightBefore(data.user.receive_night_before);
@@ -171,25 +173,61 @@ export default function Dashboard() {
                 <p style={{ color: "var(--text-secondary)" }}>
                   Tài khoản của bạn đã được kết nối với Zalo Bot. Bạn sẽ nhận được các thông báo nhắc lịch học tự động theo cấu hình bên cạnh.
                 </p>
+                <div style={{ backgroundColor: "var(--bg-tertiary)", padding: "1rem", borderRadius: "var(--radius-md)", borderLeft: "4px solid var(--error)", marginTop: "0.5rem" }}>
+                  <p style={{ fontSize: "0.95rem", fontWeight: "600", marginBottom: "0.5rem" }}>👉 Hủy liên kết nhận thông báo:</p>
+                  <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)", marginBottom: "0.5rem" }}>
+                    Để hủy đăng ký nhận thông báo, hãy gửi tin nhắn với cú pháp chính xác bên dưới tới Zalo Bot:
+                  </p>
+                  <div style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)", padding: "0.75rem", borderRadius: "var(--radius-sm)", textAlign: "center", fontWeight: "800", letterSpacing: "0.05em", color: "var(--error)", fontSize: "1.1rem" }}>
+                    HDK {user?.student_id}
+                  </div>
+                </div>
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                   <span className="badge badge-warning">Chưa Liên Kết Zalo</span>
                 </div>
+                
+                {botProfile?.qrUrl ? (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.5rem", padding: "1rem", backgroundColor: "var(--bg-tertiary)", borderRadius: "var(--radius-md)", border: "1px solid var(--border)" }}>
+                    <p style={{ fontSize: "0.9rem", fontWeight: "600", color: "var(--text-secondary)", marginBottom: "0.25rem" }}>Quét mã để kết nối Zalo Bot:</p>
+                    <img 
+                      src={botProfile.qrUrl} 
+                      alt="Zalo Bot QR" 
+                      style={{ width: "160px", height: "160px", borderRadius: "var(--radius-md)", border: "1px solid var(--border)", padding: "4px", backgroundColor: "#fff" }} 
+                    />
+                    {botProfile.displayName && (
+                      <span style={{ fontSize: "0.95rem", fontWeight: "700", color: "var(--text-primary)" }}>{botProfile.displayName}</span>
+                    )}
+                    {botProfile.username && (
+                      <a 
+                        href={`https://zalo.me/${botProfile.username}`} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="btn btn-secondary" 
+                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem", textDecoration: "none", marginTop: "0.25rem", display: "inline-flex", alignItems: "center", gap: "0.25rem" }}
+                      >
+                        💬 Mở Chat Zalo
+                      </a>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ padding: "1rem", backgroundColor: "var(--error-glow)", border: "1px solid rgba(239,68,68,0.15)", borderRadius: "var(--radius-md)", color: "var(--error)", fontSize: "0.9rem", textAlign: "center" }}>
+                    ⚠️ Zalo Bot hiện đang ngắt kết nối. Vui lòng liên hệ quản trị viên để khởi động lại hệ thống Bot.
+                  </div>
+                )}
+
                 <div style={{ backgroundColor: "var(--bg-tertiary)", padding: "1rem", borderRadius: "var(--radius-md)", borderLeft: "4px solid var(--warning)" }}>
-                  <p style={{ fontSize: "0.95rem", fontWeight: "600", marginBottom: "0.5rem" }}>👉 Hướng dẫn liên kết Zalo nhanh:</p>
+                  <p style={{ fontSize: "0.95rem", fontWeight: "600", marginBottom: "0.5rem" }}>👉 Hướng dẫn liên kết nhanh:</p>
                   <ol style={{ paddingLeft: "1.25rem", fontSize: "0.9rem", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                    <li>Quét mã QR Zalo Bot ở trang Admin hoặc kết bạn với số điện thoại của Bot Zalo.</li>
-                    <li>Gửi tin nhắn chính xác cú pháp sau tới Zalo Bot:</li>
+                    <li>Quét mã QR ở trên hoặc mở chat trực tiếp với Zalo Bot.</li>
+                    <li>Gửi tin nhắn chính xác cú pháp sau để kích hoạt nhận lịch học:</li>
                   </ol>
                   <div style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)", padding: "0.75rem", borderRadius: "var(--radius-sm)", marginTop: "0.75rem", textAlign: "center", fontWeight: "800", letterSpacing: "0.05em", color: "var(--accent)", fontSize: "1.1rem" }}>
                     DK {user?.student_id}
                   </div>
                 </div>
-                <p style={{ fontSize: "0.85rem", color: "var(--text-tertiary)" }}>
-                  Sau khi nhắn tin, Bot sẽ tự động chấp nhận kết bạn, liên kết tài khoản và trả lời xác nhận thành công.
-                </p>
               </div>
             )}
           </div>

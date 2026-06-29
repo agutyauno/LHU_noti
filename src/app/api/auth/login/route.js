@@ -12,8 +12,10 @@ export async function POST(request) {
       );
     }
 
+    const normalizedUsername = username.trim().toLowerCase();
+
     // Find user
-    const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+    const user = db.prepare("SELECT * FROM users WHERE username = ?").get(normalizedUsername);
     if (!user) {
       return Response.json(
         { error: "Sai tên đăng nhập hoặc mật khẩu" },
@@ -22,7 +24,13 @@ export async function POST(request) {
     }
 
     // Compare password
-    const isMatch = bcrypt.compareSync(password, user.password_hash);
+    let isMatch = false;
+    try {
+      isMatch = bcrypt.compareSync(password, user.password_hash);
+    } catch (e) {
+      console.error("[Login] Bcrypt verification error (possible malformed hash):", e.message);
+    }
+
     if (!isMatch) {
       return Response.json(
         { error: "Sai tên đăng nhập hoặc mật khẩu" },

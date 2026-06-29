@@ -73,6 +73,58 @@ function runHeartbeat() {
 }
 
 /**
+ * Fetches and stores the bot's own profile and contact QR code in the database
+ */
+async function storeBotProfile(api, status, extraData = {}) {
+  try {
+    const ownId = api.getOwnId();
+    const profileRes = await api.fetchAccountInfo();
+    const qrRes = await api.getQR(ownId);
+    const profileData = {
+      displayName: profileRes.profile.displayName,
+      username: profileRes.profile.username,
+      avatar: profileRes.profile.avatar,
+      qrUrl: qrRes[ownId]
+    };
+    
+    const baseQuery = {
+      status,
+      error_message: null,
+      profile_info: JSON.stringify(profileData),
+      ...extraData
+    };
+    
+    const cols = Object.keys(baseQuery);
+    const setExpr = cols.map(c => `${c} = ?`).join(", ");
+    const vals = cols.map(c => baseQuery[c]);
+    vals.push("bot_session");
+    
+    db.prepare(`
+      UPDATE zalo_sessions
+      SET ${setExpr}, updated_at = CURRENT_TIMESTAMP
+      WHERE key = ?
+    `).run(...vals);
+    console.log(`[Daemon] Successfully logged in and stored bot profile for ${profileRes.profile.displayName}`);
+  } catch (err) {
+    console.error("[Daemon] Error storing bot profile:", err.message);
+    const baseQuery = {
+      status,
+      error_message: `Profile fetch warning: ${err.message}`,
+      ...extraData
+    };
+    const cols = Object.keys(baseQuery);
+    const setExpr = cols.map(c => `${c} = ?`).join(", ");
+    const vals = cols.map(c => baseQuery[c]);
+    vals.push("bot_session");
+    db.prepare(`
+      UPDATE zalo_sessions
+      SET ${setExpr}, updated_at = CURRENT_TIMESTAMP
+      WHERE key = ?
+    `).run(...vals);
+  }
+}
+
+/**
  * Starts the Zalo Bot Daemon
  */
 async function startDaemon() {
@@ -107,12 +159,7 @@ async function startDaemon() {
         userAgent
       });
       
-      console.log(`[Daemon] Cookie login successful! Logged in as: ${apiInstance.getOwnId()}`);
-      db.prepare(`
-        UPDATE zalo_sessions
-        SET status = 'CONNECTED', error_message = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE key = 'bot_session'
-      `).run();
+      await storeBotProfile(apiInstance, 'CONNECTED');
       
       setupListener(apiInstance);
       startNotificationScheduler();
@@ -225,6 +272,7 @@ async function startQRLoginFlow(force = false) {
 
     apiInstance = api;
     isStartingQR = false;
+    await storeBotProfile(apiInstance, 'CONNECTED');
     setupListener(apiInstance);
     startNotificationScheduler();
   } catch (err) {
@@ -293,6 +341,41 @@ function setupListener(api) {
       } catch (err) {
         console.error("[Daemon] Error in registration message handler:", err.message);
         await api.sendMessage("Có lỗi xảy ra trong quá trình xử lý đăng ký. Vui lòng thử lại sau.", threadId);
+      }
+    } else if (text.toUpperCase().startsWith("HDK ")) {
+      const studentId = text.substring(4).trim();
+      if (!studentId) {
+        await api.sendMessage("Cú pháp không hợp lệ. Vui lòng nhắn: HDK [MSSV/MSCB] (Ví dụ: HDK 123000784)", threadId);
+        return;
+      }
+      
+      try {
+        const user = db.prepare("SELECT * FROM users WHERE student_id = ?").get(studentId);
+        
+        if (!user) {
+          await api.sendMessage(`Mã số ${studentId} chưa được đăng ký trên hệ thống.`, threadId);
+          return;
+        }
+        
+        if (user.zalo_thread_id !== threadId) {
+          await api.sendMessage(`Mã số ${studentId} chưa được liên kết với tài khoản Zalo này. Bạn không thể hủy liên kết tài khoản của người khác.`, threadId);
+          return;
+        }
+        
+        // 1. Unlink Zalo thread ID (set to NULL)
+        db.prepare("UPDATE users SET zalo_thread_id = NULL WHERE student_id = ?").run(studentId);
+        
+        // 2. Clear all PENDING notifications for this user
+        db.prepare(`
+          DELETE FROM queue_notifications 
+          WHERE student_id = ? AND status = 'PENDING'
+        `).run(studentId);
+        
+        await api.sendMessage(`Hủy nhận thông báo lịch học thành công cho mã số ${studentId}.`, threadId);
+        console.log(`[Daemon] Unlinked Zalo Thread ID for student ${studentId}`);
+      } catch (err) {
+        console.error("[Daemon] Error in unregistration message handler:", err.message);
+        await api.sendMessage("Có lỗi xảy ra trong quá trình hủy đăng ký. Vui lòng thử lại sau.", threadId);
       }
     }
   });

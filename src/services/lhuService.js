@@ -5,72 +5,83 @@ import db from "../db/index.js";
  * and upserts it into the SQLite schedules table.
  */
 export async function syncUserSchedule(studentId) {
-  const apiUrl = process.env.LHU_API_URL;
-  const apiKey = process.env.LHU_API_KEY;
+  const useMock = process.env.USE_MOCK === "true";
+  const apiUrl = useMock 
+    ? "http://localhost:3000/api/mock/lhu" 
+    : process.env.LHU_API_URL;
+  const apiKey = useMock ? "" : process.env.LHU_API_KEY;
+
+  if (!useMock && !apiUrl) {
+    throw new Error("LHU_API_URL is not configured in .env for real mode");
+  }
+
+  // If transitioning to real mode, clean up any old mock schedules for this student in SQLite DB
+  if (!useMock) {
+    db.prepare("DELETE FROM schedules WHERE student_id = ? AND id LIKE 'mock-%'").run(studentId);
+  }
 
   let scheduleList = [];
 
-  if (!apiUrl) {
-    // Return mock data for testing
-    console.log(`[LHU Sync] No LHU_API_URL configured. Generating mock schedules for student: ${studentId}`);
-    scheduleList = generateMockSchedules(studentId);
-  } else {
-    try {
-      const today = new Date().toISOString();
-      const payload = {
-        StudentID: studentId,
-        Ngay: today,
-        PageIndex: 1,
-        PageSize: 100
-      };
+  try {
+    const today = new Date().toISOString();
+    const payload = {
+      StudentID: studentId,
+      Ngay: today,
+      PageIndex: 1,
+      PageSize: 100
+    };
 
-      const response = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": apiKey ? `Bearer ${apiKey}` : ""
-        },
-        body: JSON.stringify(payload)
-      });
+    console.log(`[LHU Sync] Syncing schedules for ${studentId} (Mock: ${useMock}, URL: ${apiUrl})...`);
 
-      if (!response.ok) {
-        throw new Error(`LHU API responded with status ${response.status}`);
-      }
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": apiKey ? `Bearer ${apiKey}` : ""
+      },
+      body: JSON.stringify(payload)
+    });
 
-      const resData = await response.json();
-
-      // Parse data array - look for the third element data[2] or fallback
-      let rawData = [];
-      if (resData.data && Array.isArray(resData.data)) {
-        rawData = resData.data[2] || resData.data;
-      } else if (Array.isArray(resData)) {
-        rawData = resData[2] || resData;
-      }
-
-      if (Array.isArray(rawData)) {
-        scheduleList = rawData.map((item, idx) => {
-          const dateStr = item.ThoiGianBD ? item.ThoiGianBD.split("T")[0] : (item.Date || item.Ngay || item.date || new Date().toISOString().split("T")[0]);
-          const timeStart = item.ThoiGianBD ? item.ThoiGianBD.split("T")[1].substring(0, 5) : (item.TimeStart || item.GioBatDau || item.time_start || "07:30");
-          const timeEnd = item.ThoiGianKT ? item.ThoiGianKT.split("T")[1].substring(0, 5) : (item.TimeEnd || item.GioKetThuc || item.time_end || "11:00");
-
-          return {
-            id: String(item.ID || item.Id || item.id || `lhu-${studentId}-${idx}-${Date.now()}`),
-            student_id: studentId,
-            subject_name: item.TenMonHoc || item.SubjectName || item.TenMon || item.subject_name || "Môn học không tên",
-            room: item.TenPhong || item.Room || item.Phong || item.room || "Tự do",
-            teacher: item.GiaoVien || item.Teacher || item.teacher || "Chưa xếp giảng viên",
-            date: dateStr,
-            time_start: timeStart,
-            time_end: timeEnd,
-            lesson_nums: String(item.Tiet || item.lesson_nums || ""),
-            class_name: item.TenNhom || item.ClassName || item.Lop || item.class_name || ""
-          };
-        });
-      }
-    } catch (err) {
-      console.error(`[LHU Sync] Error calling real LHU API, falling back to mock:`, err.message);
-      scheduleList = generateMockSchedules(studentId);
+    if (!response.ok) {
+      throw new Error(`LHU API responded with status ${response.status}`);
     }
+
+    const resData = await response.json();
+
+    // Parse data array - look for the third element data[2] or fallback
+    let rawData = [];
+    if (resData.data && Array.isArray(resData.data)) {
+      rawData = resData.data[2] || resData.data;
+    } else if (Array.isArray(resData)) {
+      rawData = resData[2] || resData;
+    }
+
+    if (Array.isArray(rawData)) {
+      scheduleList = rawData.map((item, idx) => {
+        const dateStr = item.ThoiGianBD ? item.ThoiGianBD.split("T")[0] : (item.Date || item.Ngay || item.date || new Date().toISOString().split("T")[0]);
+        const timeStart = item.ThoiGianBD ? item.ThoiGianBD.split("T")[1].substring(0, 5) : (item.TimeStart || item.GioBatDau || item.time_start || "07:30");
+        const timeEnd = item.ThoiGianKT ? item.ThoiGianKT.split("T")[1].substring(0, 5) : (item.TimeEnd || item.GioKetThuc || item.time_end || "11:00");
+
+        const rawId = item.ID || item.Id || item.id;
+        const prefix = useMock ? "mock" : "lhu";
+        const scheduleId = rawId ? `${prefix}-${studentId}-${rawId}` : `${prefix}-${studentId}-${idx}-${Date.now()}`;
+        return {
+          id: String(scheduleId),
+          student_id: studentId,
+          subject_name: item.TenMonHoc || item.SubjectName || item.TenMon || item.subject_name || "Môn học không tên",
+          room: item.TenPhong || item.Room || item.Phong || item.room || "Tự do",
+          teacher: item.GiaoVien || item.Teacher || item.teacher || "Chưa xếp giảng viên",
+          date: dateStr,
+          time_start: timeStart,
+          time_end: timeEnd,
+          lesson_nums: String(item.Tiet || item.lesson_nums || ""),
+          class_name: item.TenNhom || item.ClassName || item.Lop || item.class_name || ""
+        };
+      });
+    }
+  } catch (err) {
+    console.error(`[LHU Sync] Error calling LHU API:`, err.message);
+    throw err;
   }
 
   const todayStr = new Date().toISOString().split("T")[0];
@@ -204,102 +215,4 @@ export async function syncUserSchedule(studentId) {
   }
 
   return scheduleList;
-}
-
-/**
- * Generates test schedules relative to the current local date and time.
- * One schedule in 20 minutes (for prompt notification testing) and one tomorrow.
- */
-function generateMockSchedules(studentId) {
-  const today = new Date();
-
-  // Format dates: YYYY-MM-DD
-  const formatDate = (d) => {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const r = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${r}`;
-  };
-
-  // Schedule 1: Today, starting at 07:30 (static)
-  const timeStart1 = "07:30";
-  const timeEnd1 = "09:00";
-
-  // Schedule 2: Tomorrow morning at 07:30
-  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-
-  return [
-    {
-      id: `mock-1-${formatDate(today)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Lập trình Web nâng cao",
-      room: "I.304",
-      teacher: "ThS. Nguyễn Văn A",
-      date: formatDate(today),
-      time_start: timeStart1,
-      time_end: timeEnd1,
-      lesson_nums: "1 - 3",
-      class_name: "22DTH1"
-    },
-    {
-      id: `mock-2-${formatDate(tomorrow)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Trí tuệ nhân tạo",
-      room: "I.202",
-      teacher: "TS. Lê Hoàng B",
-      date: formatDate(tomorrow),
-      time_start: "07:30",
-      time_end: "11:00",
-      lesson_nums: "1 - 4",
-      class_name: "22DTH2"
-    },
-    {
-      id: `mock-3-${formatDate(tomorrow)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Đồ họa máy tính",
-      room: "I.202",
-      teacher: "ThS. Hoàng Thị C",
-      date: formatDate(tomorrow),
-      time_start: "16:15",
-      time_end: "18:50",
-      lesson_nums: "11 - 15",
-      class_name: "22DTH1"
-    },
-    {
-      id: `mock-4-${formatDate(today)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Lập trình Web nâng cao",
-      room: "I.304",
-      teacher: "ThS. Hoàng Thị C",
-      date: formatDate(today),
-      time_start: "10:16",
-      time_end: "12:40",
-      lesson_nums: "6 - 9",
-      class_name: "22DTH1"
-    },
-    {
-      id: `mock-5-${formatDate(today)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Lập trình Web nâng cao",
-      room: "I.304",
-      teacher: "ThS. Hoàng Thị C",
-      date: formatDate(today),
-      time_start: "10:24",
-      time_end: "12:40",
-      lesson_nums: "6 - 9",
-      class_name: "22DTH1"
-    },
-    {
-      id: `mock-6-${formatDate(today)}-${studentId}`,
-      student_id: studentId,
-      subject_name: "Lập trình Web 2",
-      room: "I.304",
-      teacher: "ThS. Hoàng Thị C",
-      date: formatDate(today),
-      time_start: "15:05",
-      time_end: "15:40",
-      lesson_nums: "6 - 9",
-      class_name: "22DTH1"
-    }
-  ];
 }

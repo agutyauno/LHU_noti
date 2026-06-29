@@ -19,6 +19,13 @@ try {
     const schemaSql = fs.readFileSync(SCHEMA_PATH, "utf8");
     db.exec(schemaSql);
   }
+  
+  // Dynamic migration for existing DB files
+  try {
+    db.exec("ALTER TABLE zalo_sessions ADD COLUMN profile_info TEXT");
+  } catch (err) {
+    // Column already exists, ignore
+  }
 } catch (error) {
   console.error("Failed to initialize SQLite Database:", error);
 }

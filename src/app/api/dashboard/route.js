@@ -26,11 +26,23 @@ export async function GET(request) {
       ORDER BY scheduled_time ASC
     `).all(studentId);
 
+    // Get bot session profile
+    let botProfile = null;
+    try {
+      const session = db.prepare("SELECT profile_info FROM zalo_sessions WHERE key = 'bot_session'").get();
+      if (session && session.profile_info) {
+        botProfile = JSON.parse(session.profile_info);
+      }
+    } catch (e) {
+      console.error("Failed to parse bot profile:", e.message);
+    }
+
     const { password_hash, ...userInfo } = user;
     return Response.json({
       user: userInfo,
       schedules,
-      notifications
+      notifications,
+      bot_profile: botProfile
     });
   } catch (error) {
     console.error("Dashboard GET error:", error);

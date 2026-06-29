@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS zalo_sessions (
     qr_code_data TEXT, -- Base64 string of QR code
     status TEXT DEFAULT 'DISCONNECTED', -- 'DISCONNECTED', 'QR_READY', 'CONNECTED'
     error_message TEXT,
+    profile_info TEXT, -- Zalo profile details (JSON string)
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

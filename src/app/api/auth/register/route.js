@@ -12,8 +12,12 @@ export async function POST(request) {
       );
     }
 
+    const normalizedUsername = username.trim().toLowerCase();
+    const normalizedStudentId = student_id.trim();
+    const normalizedFullname = fullname.trim();
+
     // Check if user already exists
-    const existingUser = db.prepare("SELECT * FROM users WHERE username = ? OR student_id = ?").get(username, student_id);
+    const existingUser = db.prepare("SELECT * FROM users WHERE username = ? OR student_id = ?").get(normalizedUsername, normalizedStudentId);
     if (existingUser) {
       return Response.json(
         { error: "Tên đăng nhập hoặc Mã số sinh viên đã tồn tại" },
@@ -29,7 +33,7 @@ export async function POST(request) {
     db.prepare(`
       INSERT INTO users (username, password_hash, student_id, fullname)
       VALUES (?, ?, ?, ?)
-    `).run(username, passwordHash, student_id, fullname);
+    `).run(normalizedUsername, passwordHash, normalizedStudentId, normalizedFullname);
 
     return Response.json({ message: "Đăng ký tài khoản thành công" });
   } catch (error) {
