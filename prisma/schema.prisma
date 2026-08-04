@@ -1,0 +1,31 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Student {
+  id               String             @id @default(uuid())
+  zaloUserId       String             @unique
+  zaloName         String?
+  studentId        String             // Mã số sinh viên LHU
+  pendingStudentId String?            // Dùng cho quy trình 2 bước xác nhận đăng ký
+  notifyTomorrow   Boolean            @default(true)
+  notifyTime       String             @default("20:00") // Format HH:mm
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  snapshots        ScheduleSnapshot[]
+}
+
+model ScheduleSnapshot {
+  id           String   @id @default(uuid())
+  studentId    String   // Maps to Student.zaloUserId
+  date         String   // Format YYYY-MM-DD
+  scheduleData String   // JSON String of schedule entries
+  updatedAt    DateTime @updatedAt
+  student      Student  @relation(fields: [studentId], references: [zaloUserId], onDelete: Cascade)
+}
