@@ -33,6 +33,7 @@ dev.db-journal
 *.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
+DataBot_LHU_Calen/
 
 # logs
 logs/
