@@ -101,7 +101,7 @@ export function computeScheduleDiff(
         type: 'CANCELED',
         subjectName: oldItem.TenMonHoc,
         groupName: oldItem.TenNhom || '',
-        description: `Hủy buổi học (${oldStart} - ${oldEnd}) môn ${oldItem.TenMonHoc} (dự kiến học tại ${oldLoc}).`,
+        description: `Hủy buổi học (${oldStart} - ${oldEnd}) môn ${oldItem.TenMonHoc} (Phòng học ${oldLoc}).`,
       });
     }
   });
