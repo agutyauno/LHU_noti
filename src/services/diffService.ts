@@ -2,7 +2,7 @@ import { prisma } from './prismaService';
 import { fetchStudentSchedule, LHUScheduleItem } from './lhuService';
 import { formatUrgentDiffAlertMessage } from './notificationService';
 import { messageQueue } from './queueService';
-import { getTodayString, getTomorrowString } from '../utils/dateUtils';
+import { getTodayString, getTomorrowString, formatTimeString } from '../utils/dateUtils';
 import { logger, diffLogger } from '../utils/logger';
 
 export interface ScheduleDiffChange {
@@ -10,6 +10,11 @@ export interface ScheduleDiffChange {
   subjectName: string;
   groupName: string;
   description: string;
+}
+
+function formatLocation(room?: string, campus?: string): string {
+  const r = room || 'Chưa xếp phòng';
+  return campus ? `${r} (${campus})` : r;
 }
 
 /**
@@ -39,21 +44,29 @@ export function computeScheduleDiff(
     const key = newItem.ID ? String(newItem.ID) : `${newItem.NhomID}_${newItem.ThoiGianBD}`;
     const oldItem = oldMap.get(key);
 
+    const newStart = formatTimeString(newItem.ThoiGianBD);
+    const newEnd = formatTimeString(newItem.ThoiGianKT);
+    const newLoc = formatLocation(newItem.TenPhong, newItem.TenCoSo);
+
     if (!oldItem) {
       changes.push({
         type: 'NEW_CLASS',
         subjectName: newItem.TenMonHoc,
         groupName: newItem.TenNhom || '',
-        description: `Bổ sung buổi học mới tại phòng ${newItem.TenPhong || 'N/A'}, GV: ${newItem.GiaoVien || 'N/A'}.`,
+        description: `Bổ sung buổi học mới (${newStart} - ${newEnd}) tại ${newLoc}, GV: ${newItem.GiaoVien || 'N/A'}.`,
       });
     } else {
+      const oldStart = formatTimeString(oldItem.ThoiGianBD);
+      const oldEnd = formatTimeString(oldItem.ThoiGianKT);
+      const oldLoc = formatLocation(oldItem.TenPhong, oldItem.TenCoSo);
+
       // Room Change
-      if (oldItem.TenPhong !== newItem.TenPhong) {
+      if (oldItem.TenPhong !== newItem.TenPhong || oldItem.TenCoSo !== newItem.TenCoSo) {
         changes.push({
           type: 'ROOM_CHANGED',
           subjectName: newItem.TenMonHoc,
           groupName: newItem.TenNhom || '',
-          description: `Đổi phòng học từ "${oldItem.TenPhong || 'Chưa xếp'}" sang "${newItem.TenPhong || 'Chưa xếp'}".`,
+          description: `Đổi địa điểm học buổi (${newStart} - ${newEnd}) từ "${oldLoc}" sang "${newLoc}".`,
         });
       }
       // Time Change
@@ -62,7 +75,7 @@ export function computeScheduleDiff(
           type: 'TIME_CHANGED',
           subjectName: newItem.TenMonHoc,
           groupName: newItem.TenNhom || '',
-          description: `Thay đổi giờ học từ (${oldItem.ThoiGianBD}) sang (${newItem.ThoiGianBD}).`,
+          description: `Thay đổi giờ học tại ${newLoc} từ (${oldStart} - ${oldEnd}) sang (${newStart} - ${newEnd}).`,
         });
       }
       // Teacher Change
@@ -71,7 +84,7 @@ export function computeScheduleDiff(
           type: 'TEACHER_CHANGED',
           subjectName: newItem.TenMonHoc,
           groupName: newItem.TenNhom || '',
-          description: `Đổi giảng viên từ "${oldItem.GiaoVien || 'N/A'}" sang "${newItem.GiaoVien || 'N/A'}".`,
+          description: `Đổi giảng viên buổi (${newStart} - ${newEnd}) tại ${newLoc} từ "${oldItem.GiaoVien || 'N/A'}" sang "${newItem.GiaoVien || 'N/A'}".`,
         });
       }
     }
@@ -81,11 +94,14 @@ export function computeScheduleDiff(
   oldSchedule.forEach((oldItem) => {
     const key = oldItem.ID ? String(oldItem.ID) : `${oldItem.NhomID}_${oldItem.ThoiGianBD}`;
     if (!newMap.has(key)) {
+      const oldStart = formatTimeString(oldItem.ThoiGianBD);
+      const oldEnd = formatTimeString(oldItem.ThoiGianKT);
+      const oldLoc = formatLocation(oldItem.TenPhong, oldItem.TenCoSo);
       changes.push({
         type: 'CANCELED',
         subjectName: oldItem.TenMonHoc,
         groupName: oldItem.TenNhom || '',
-        description: `Hủy buổi học môn ${oldItem.TenMonHoc} (dự kiến học tại phòng ${oldItem.TenPhong}).`,
+        description: `Hủy buổi học (${oldStart} - ${oldEnd}) môn ${oldItem.TenMonHoc} (dự kiến học tại ${oldLoc}).`,
       });
     }
   });
@@ -100,15 +116,23 @@ export async function checkStudentDiffForDate(
   zaloUserId: string,
   studentId: string,
   zaloName: string | null,
-  dateStr: string
+  dateStr: string,
+  newScheduleInput?: LHUScheduleItem[],
+  studentNameInput?: string
 ): Promise<void> {
-  const fetchResult = await fetchStudentSchedule(studentId, dateStr);
+  let newSchedule: LHUScheduleItem[] = [];
+  let studentName = studentNameInput || zaloName || studentId;
 
-  // Anti-false-alarm safeguard:
-  // If API call fails or degraded, log and skip comparison
-  if (!fetchResult.success) {
-    logger.warn(`API_DEGRADED: Skipping diff engine for ${studentId} on ${dateStr} due to API error: ${fetchResult.error}`);
-    return;
+  if (newScheduleInput !== undefined) {
+    newSchedule = newScheduleInput;
+  } else {
+    const fetchResult = await fetchStudentSchedule(studentId, dateStr);
+    if (!fetchResult.success) {
+      logger.warn(`API_DEGRADED: Skipping diff engine for ${studentId} on ${dateStr} due to API error: ${fetchResult.error}`);
+      return;
+    }
+    newSchedule = fetchResult.scheduleList;
+    if (fetchResult.studentName) studentName = fetchResult.studentName;
   }
 
   // Retrieve existing snapshot from DB
@@ -128,8 +152,6 @@ export async function checkStudentDiffForDate(
     }
   }
 
-  const newSchedule = fetchResult.scheduleList;
-
   // If snapshot exists, calculate diff
   if (existingSnapshot) {
     const changes = computeScheduleDiff(oldSchedule, newSchedule);
@@ -142,7 +164,6 @@ export async function checkStudentDiffForDate(
 
       // High Priority Alert for Today or Tomorrow
       if (dateStr === todayStr || dateStr === tomorrowStr) {
-        const studentName = fetchResult.studentName || zaloName || studentId;
         const alertMsg = formatUrgentDiffAlertMessage(studentName, dateStr, changes);
         messageQueue.enqueue(zaloUserId, alertMsg);
       }
@@ -186,8 +207,22 @@ export async function runDiffScannerAllActiveStudents(): Promise<void> {
     const tomorrowStr = getTomorrowString();
 
     for (const student of activeStudents) {
-      await checkStudentDiffForDate(student.zaloUserId, student.studentId, student.zaloName, todayStr);
-      await checkStudentDiffForDate(student.zaloUserId, student.studentId, student.zaloName, tomorrowStr);
+      // Fetch ONCE starting from todayStr (unfiltered) containing today and future days
+      const fetchResult = await fetchStudentSchedule(student.studentId, todayStr, 100, false);
+      if (!fetchResult.success) {
+        logger.warn(`API_DEGRADED: Skipping diff engine for ${student.studentId} due to API error: ${fetchResult.error}`);
+        continue;
+      }
+
+      const rawSchedule = fetchResult.scheduleList || [];
+      const studentName = fetchResult.studentName || student.zaloName || student.studentId;
+
+      // Extract today and tomorrow schedules in memory
+      const todaySchedule = rawSchedule.filter((item) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(todayStr));
+      const tomorrowSchedule = rawSchedule.filter((item) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(tomorrowStr));
+
+      await checkStudentDiffForDate(student.zaloUserId, student.studentId, studentName, todayStr, todaySchedule, studentName);
+      await checkStudentDiffForDate(student.zaloUserId, student.studentId, studentName, tomorrowStr, tomorrowSchedule, studentName);
     }
 
     logger.info('Diff Scanner cycle completed successfully.');

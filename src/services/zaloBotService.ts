@@ -1,4 +1,4 @@
-import { Bot as ZaloBot, Message, BotErrorContext } from 'zalo-bot-js';
+import { Bot as ZaloBot, Message, BotErrorContext, FetchRequest } from 'zalo-bot-js';
 import { prisma } from './prismaService';
 import { fetchStudentSchedule } from './lhuService';
 import {
@@ -14,18 +14,42 @@ export type BotStatus = 'DISCONNECTED' | 'CONNECTING' | 'READY' | 'SESSION_EXPIR
 
 let botStatus: BotStatus = 'DISCONNECTED';
 let zaloBotInstance: ZaloBot | null = null;
+let isPollingLoopActive = false;
 
 export function getBotStatus(): BotStatus {
   return botStatus;
 }
 
+export async function processZaloWebhookUpdate(payload: any): Promise<void> {
+  if (!zaloBotInstance || !payload) return;
+
+  let normalizedPayload = payload;
+  if (payload.result && typeof payload.result === 'object' && payload.result.message) {
+    normalizedPayload = {
+      update_id: payload.update_id || payload.result.update_id || Date.now(),
+      ...payload.result,
+    };
+  }
+
+  await zaloBotInstance.processUpdate(normalizedPayload);
+}
+
 export async function initZaloBot(): Promise<void> {
   try {
     botStatus = 'CONNECTING';
-    logger.info('Initializing Zalo Bot Service via zalo-bot-js...');
+    logger.info(`Initializing Zalo Bot Service in [${config.botMode.toUpperCase()}] mode...`);
 
     const token = config.zaloBotToken || 'default_zalo_bot_token';
-    const bot = new ZaloBot({ token });
+
+    // Create FetchRequests with 30s timeout
+    const fetchTransport = new FetchRequest({ readTimeout: 30000 });
+    const pollingTransport = new FetchRequest({ readTimeout: 30000 });
+
+    const bot = new ZaloBot({
+      token,
+      request: fetchTransport,
+      pollingRequest: pollingTransport,
+    });
     zaloBotInstance = bot;
 
     // Register queue handler for outgoing messages
@@ -35,7 +59,18 @@ export async function initZaloBot(): Promise<void> {
         return false;
       }
       try {
-        await zaloBotInstance.sendMessage(zaloUserId, message);
+        logger.info(`Dispatching Zalo message to recipient: ${zaloUserId} (Length: ${message.length} chars)`);
+        const sentMsg = await zaloBotInstance.sendMessage(zaloUserId, message);
+        
+        // If messageId starts with 'local-', zalo-bot-js created a fallback object because Zalo API returned an error
+        if (sentMsg?.messageId?.startsWith('local-')) {
+          logger.error(
+            `Zalo API delivery failed for recipient ${zaloUserId}. Raw response from Zalo: ${JSON.stringify((sentMsg as any)?.raw || {})}`
+          );
+          return false;
+        }
+
+        logger.info(`Zalo message delivered successfully to ${zaloUserId}. Message ID: ${sentMsg?.messageId || 'N/A'}`);
         return true;
       } catch (err: any) {
         logger.error(`Error in zaloBotInstance.sendMessage to ${zaloUserId}: ${err.message}`);
@@ -45,11 +80,12 @@ export async function initZaloBot(): Promise<void> {
 
     // Error handler
     bot.onError((err: unknown, context: BotErrorContext) => {
-      logger.error('Zalo Bot error event:', { err, context });
-      const errStr = String(err);
-      if (errStr.includes('session') || errStr.includes('cookie') || errStr.includes('token')) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      if (errMessage.includes('InvalidToken') || errMessage.includes('rejectedToken') || errMessage.includes('401')) {
         botStatus = 'SESSION_EXPIRED';
-        logger.error('CRITICAL: Zalo Bot session/token expired! Admin re-login required.');
+        logger.error('CRITICAL: Zalo Bot Token expired or rejected! Admin check required.');
+      } else {
+        logger.debug(`Zalo Bot notice: ${errMessage}`);
       }
     });
 
@@ -59,6 +95,8 @@ export async function initZaloBot(): Promise<void> {
         const chatId = msg.chat?.id || msg.fromUser?.id || '';
         const senderName = msg.fromUser?.displayName || msg.fromUser?.accountName || 'User';
         const body = msg.text || '';
+
+        logger.info(`Zalo Bot Event: Received message from ChatID [${chatId}] (${senderName}): "${body}"`);
 
         if (chatId) {
           await handleIncomingZaloMessage({
@@ -72,15 +110,74 @@ export async function initZaloBot(): Promise<void> {
       }
     });
 
-    // Attempt initialize and start polling
+    // Attempt initialize
     await bot.initialize();
-    bot.startPolling();
     botStatus = 'READY';
-    logger.info('Zalo Bot initialized & polling started successfully! Status: READY');
+
+    if (config.botMode === 'polling') {
+      try {
+        await bot.deleteWebhook();
+        logger.info('Cleared previous Webhook URL from Zalo API to activate Polling mode.');
+      } catch (err: any) {
+        logger.debug(`Notice clearing Webhook: ${err.message}`);
+      }
+      logger.info(`Zalo Bot authenticated and READY! (Polling Mode Active - Interval: ${config.botPollIntervalMs}ms)`);
+      startSafePollingLoop(bot);
+    } else {
+      if (config.zaloWebhookUrl) {
+        try {
+          const webhookEndpoint = config.zaloWebhookUrl.endsWith('/api/zalo-webhook')
+            ? config.zaloWebhookUrl
+            : `${config.zaloWebhookUrl.replace(/\/$/, '')}/api/zalo-webhook`;
+
+          logger.info(`Setting Webhook URL with Zalo API: ${webhookEndpoint}`);
+          await bot.setWebhook(webhookEndpoint, config.zaloWebhookSecret);
+          logger.info(`Successfully registered Webhook URL with Zalo API.`);
+
+          logger.info('Calling getWebhookInfo to verify Zalo Webhook configuration...');
+          const webhookInfo = await bot.getWebhookInfo();
+          if (webhookInfo) {
+            logger.info(`Zalo Webhook Info Verified: URL = "${webhookInfo.url}"${webhookInfo.updatedAt ? `, UpdatedAt = ${webhookInfo.updatedAt}` : ''}`);
+          } else {
+            logger.warn('Unable to verify Webhook Info: Zalo API returned empty data.');
+          }
+        } catch (err: any) {
+          logger.warn(`Notice setting/verifying Webhook URL: ${err.message}`);
+        }
+      } else {
+        logger.info('Zalo Bot Webhook Mode Active. (Fill ZALO_WEBHOOK_URL in .env for auto-registration)');
+      }
+      logger.info('Zalo Bot authenticated and READY! (Webhook Mode Active)');
+    }
   } catch (error: any) {
     botStatus = 'SESSION_EXPIRED';
     logger.error(`Failed to initialize Zalo Bot: ${error.message}`);
     logger.warn('Zalo Bot in standby mode. Web server and scheduler remain active.');
+  }
+}
+
+/**
+ * Safe Custom Polling Loop that catches Gateway 504 HTML timeouts cleanly
+ */
+async function startSafePollingLoop(bot: ZaloBot) {
+  if (isPollingLoopActive) return;
+  isPollingLoopActive = true;
+
+  while (isPollingLoopActive && botStatus === 'READY') {
+    try {
+      const updates = await bot.getUpdates({ timeout: 0 });
+      if (updates && updates.length > 0) {
+        for (const update of updates) {
+          await bot.processUpdate(update);
+        }
+      }
+    } catch (err: any) {
+      // Gracefully ignore Nginx 504 Gateway HTML or transient polling errors
+      logger.debug(`Polling loop tick notice: ${err.message || 'Transient error'}`);
+    }
+
+    // Sleep before next poll cycle
+    await new Promise((resolve) => setTimeout(resolve, config.botPollIntervalMs));
   }
 }
 
@@ -232,13 +329,17 @@ export async function handleIncomingZaloMessage(msg: {
   // 7. Command: /tuannay
   if (lowerText === '/tuannay' || lowerText === 'tuannay') {
     const weekDays = getCurrentWeekDays();
-    const weeklyMap: Array<{ date: string; schedule: any[] }> = [];
-    let studentName = student.zaloName || student.studentId;
+    const mondayStr = weekDays[0];
 
+    // Single API call starting from Monday of the week
+    const res = await fetchStudentSchedule(student.studentId, mondayStr, 100, false);
+    const studentName = res.studentName || student.zaloName || student.studentId;
+    const rawSchedule = res.scheduleList || [];
+
+    const weeklyMap: Array<{ date: string; schedule: any[] }> = [];
     for (const date of weekDays) {
-      const res = await fetchStudentSchedule(student.studentId, date);
-      if (res.studentName) studentName = res.studentName;
-      weeklyMap.push({ date, schedule: res.scheduleList });
+      const daySchedule = rawSchedule.filter((item) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(date));
+      weeklyMap.push({ date, schedule: daySchedule });
     }
 
     const reply = formatWeeklyScheduleMessage(studentName, weeklyMap);

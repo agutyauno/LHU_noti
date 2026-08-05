@@ -64,15 +64,37 @@ axiosRetry(lhuClient, {
   },
 });
 
+import { generateMockLHUResponse } from '../data/mockSchedule';
+
 /**
  * Fetch schedule from LHU API for a given student ID and date (YYYY-MM-DD)
  */
-export async function fetchStudentSchedule(studentId: string, dateStr: string): Promise<LHUApiFetchResult> {
+export async function fetchStudentSchedule(
+  studentId: string,
+  dateStr: string,
+  pageSize: number = 100,
+  filterByExactDate: boolean = true
+): Promise<LHUApiFetchResult> {
+  // If USE_MOCK is true, return dynamic mock data matching real-time dates
+  if (config.useMock) {
+    logger.info(`[MOCK MODE ACTIVE] Serving mock schedule data for Student: ${studentId}, Date: ${dateStr}`);
+    const mockRes = generateMockLHUResponse(studentId, dateStr, config.mockDiff);
+    const filteredList = filterByExactDate
+      ? mockRes.scheduleList.filter((item) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(dateStr))
+      : mockRes.scheduleList;
+
+    return {
+      success: true,
+      studentName: mockRes.studentName,
+      scheduleList: filteredList,
+    };
+  }
+
   const payload = {
     studentid: studentId,
     ngay: dateStr,
     pageindex: 1,
-    pagesize: 100,
+    pagesize: pageSize,
   };
 
   try {
@@ -92,7 +114,10 @@ export async function fetchStudentSchedule(studentId: string, dateStr: string): 
     if (!Array.isArray(data)) {
       // Check if root data itself is schedule array or error
       if (Array.isArray(response.data)) {
-        return { success: true, scheduleList: response.data };
+        const list = filterByExactDate
+          ? response.data.filter((item: LHUScheduleItem) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(dateStr))
+          : response.data;
+        return { success: true, scheduleList: list };
       }
       return { success: false, scheduleList: [], error: 'Invalid API response format' };
     }
@@ -102,10 +127,15 @@ export async function fetchStudentSchedule(studentId: string, dateStr: string): 
 
     const studentName = studentInfoArr[0]?.HoTen || undefined;
 
+    // Filter schedule items to only include those matching exact dateStr (YYYY-MM-DD)
+    const filteredSchedule = filterByExactDate
+      ? scheduleArr.filter((item) => item?.ThoiGianBD && item.ThoiGianBD.startsWith(dateStr))
+      : scheduleArr;
+
     return {
       success: true,
       studentName,
-      scheduleList: scheduleArr,
+      scheduleList: filteredSchedule,
     };
   } catch (error: any) {
     logger.error(`Error fetching LHU API for student ${studentId} on ${dateStr}: ${error.message}`);

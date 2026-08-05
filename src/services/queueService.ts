@@ -10,6 +10,40 @@ export interface QueueMessage {
 
 type SendHandler = (zaloUserId: string, message: string) => Promise<boolean>;
 
+export function splitMessageIntoChunks(message: string, maxLen: number = 1800): string[] {
+  if (message.length <= maxLen) return [message];
+
+  const lines = message.split('\n');
+  const chunks: string[] = [];
+  let currentChunk = '';
+
+  for (const line of lines) {
+    if (line.length > maxLen) {
+      if (currentChunk.trim()) {
+        chunks.push(currentChunk.trim());
+        currentChunk = '';
+      }
+      for (let i = 0; i < line.length; i += maxLen) {
+        chunks.push(line.slice(i, i + maxLen));
+      }
+      continue;
+    }
+
+    if ((currentChunk + '\n' + line).length > maxLen) {
+      chunks.push(currentChunk.trim());
+      currentChunk = line;
+    } else {
+      currentChunk = currentChunk ? `${currentChunk}\n${line}` : line;
+    }
+  }
+
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
+  }
+
+  return chunks;
+}
+
 class MessageQueueService {
   private queue: QueueMessage[] = [];
   private isProcessing = false;
@@ -21,20 +55,27 @@ class MessageQueueService {
     this.sendHandler = handler;
   }
 
-  public enqueue(zaloUserId: string, message: string): string {
-    const id = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-    const item: QueueMessage = {
-      id,
-      zaloUserId,
-      message,
-      createdAt: new Date(),
-    };
-    this.queue.push(item);
-    logger.info(`Message queued for ZaloUser: ${zaloUserId}. Queue length: ${this.queue.length}`);
-    
+  public enqueue(zaloUserId: string, message: string): string[] {
+    const chunks = splitMessageIntoChunks(message, 1800);
+    const ids: string[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkText = chunks.length > 1 ? `[Phần ${i + 1}/${chunks.length}]\n${chunks[i]}` : chunks[i];
+      const id = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      this.queue.push({
+        id,
+        zaloUserId,
+        message: chunkText,
+        createdAt: new Date(),
+      });
+      ids.push(id);
+    }
+
+    logger.info(`Queued ${chunks.length} message chunk(s) for ZaloUser: ${zaloUserId}. Queue length: ${this.queue.length}`);
+
     // Trigger processing loop if not already running
     this.processQueue();
-    return id;
+    return ids;
   }
 
   private async processQueue() {
@@ -46,7 +87,7 @@ class MessageQueueService {
       if (!item) break;
 
       if (!this.sendHandler) {
-        logger.error(`Send handler not registered in MessageQueueService! Dropping message for ${item.zaloUserId}`);
+        logger.warn(`No active Zalo send handler registered (Test/Standalone mode). Dropping message for ${item.zaloUserId}`);
         this.failedCount++;
         continue;
       }

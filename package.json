@@ -9,7 +9,11 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
-    "test": "node --test"
+    "test": "ts-node src/tests/system.test.ts",
+    "test:hello-bot": "node node_modules/zalo-bot-js/dist/test/hello-bot.js",
+    "test:token": "node node_modules/zalo-bot-js/dist/test/check-token.js",
+    "simulate": "ts-node src/scripts/simulate.ts",
+    "test:simulate-api": "ts-node src/tests/simulateApi.test.ts"
   },
   "keywords": [
     "lhu",
